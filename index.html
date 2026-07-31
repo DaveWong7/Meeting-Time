@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f3f4f8;
+    --text: #16181d;
+    --muted: #6b7280;
+    --line: #d9dce4;
+    --line-strong: #b6bbc7;
+    --on: #2f7d5d;
+    --on-soft: #dff0e7;
+    --erase: #c8553d;
+    --star: #d99000;
+    --radius: 3px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; background: transparent; color: var(--text);
+    font-family: var(--font, "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+    font-size: 13px;
+  }
+  #root { padding: 2px 0 8px 0; }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin: 0 0 8px 0; color: var(--muted); font-size: 12px;
+  }
+  .hint { letter-spacing: .01em; }
+  .modebtn {
+    border: 1px solid var(--line-strong); background: var(--bg); color: var(--text);
+    padding: 4px 10px; border-radius: 99px; font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  .modebtn[data-active="scroll"] { background: var(--panel); }
+
+  .wrap { overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; }
+  .wrap.scrolling { touch-action: auto; }
+  .wrap.painting { touch-action: none; }
+
+  .grid {
+    display: grid;
+    min-width: max-content;
+    user-select: none; -webkit-user-select: none;
+  }
+
+  .hcell {
+    padding: 4px 2px 6px 2px; text-align: center; line-height: 1.15;
+    border-bottom: 1px solid var(--line-strong);
+    position: sticky; top: 0; background: var(--bg); z-index: 2;
+  }
+  .hcell .dow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .hcell .day { font-size: 14px; font-weight: 600; }
+  .hcell .tag { font-size: 10px; color: var(--on); letter-spacing: .04em; text-transform: uppercase; }
+  .hcell.clickable { cursor: pointer; }
+  .hcell.clickable:hover .day { text-decoration: underline; text-underline-offset: 3px; }
+  .hcell.weekend .day { color: var(--muted); }
+
+  .corner { position: sticky; left: 0; top: 0; background: var(--bg); z-index: 3; border-bottom: 1px solid var(--line-strong); }
+
+  .tlabel {
+    position: sticky; left: 0; background: var(--bg); z-index: 1;
+    font-size: 11px; color: var(--muted); text-align: right;
+    padding: 0 8px 0 2px; line-height: 1;
+    display: flex; align-items: center; justify-content: flex-end;
+    font-variant-numeric: tabular-nums;
+  }
+  .tlabel.clickable { cursor: pointer; }
+  .tlabel.clickable:hover { color: var(--text); text-decoration: underline; }
+
+  .cell {
+    border-right: 1px solid var(--line);
+    border-bottom: 1px dotted var(--line);
+    background: var(--panel);
+    position: relative;
+  }
+  .cell.hourline { border-bottom: 1px solid var(--line-strong); }
+  .cell.daystart { border-left: 1px solid var(--line-strong); }
+  .cell.lastcol { border-right: 1px solid var(--line-strong); }
+
+  /* ---- edit mode ---- */
+  .edit .cell { cursor: crosshair; }
+  .edit .cell.on { background: var(--on); }
+  .edit .cell.pv-add { background: var(--on-soft); box-shadow: inset 0 0 0 1px var(--on); }
+  .edit .cell.pv-del { background: #f7e2dd; box-shadow: inset 0 0 0 1px var(--erase); }
+
+  /* ---- view mode ---- */
+  .view .cell { cursor: default; }
+  .view .cell .n {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.45);
+    font-variant-numeric: tabular-nums; pointer-events: none;
+  }
+  .view .cell.best { box-shadow: inset 0 0 0 2px var(--star); z-index: 1; }
+  .view .cell.dim .n { color: var(--muted); text-shadow: none; }
+  .view .cell.me { outline: 2px dashed #111; outline-offset: -2px; z-index: 2; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+  .empty { padding: 18px 4px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+/* ------------------------------------------------------------------ */
+/* Minimal Streamlit component protocol (no build step required)       */
+/* ------------------------------------------------------------------ */
+function _post(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+}
+const Streamlit = {
+  ready: () => _post("streamlit:componentReady", { apiVersion: 1 }),
+  height: (h) => _post("streamlit:setFrameHeight", { height: h }),
+  value: (v) => _post("streamlit:setComponentValue", { value: v, dataType: "json" })
+};
+
+/* ------------------------------------------------------------------ */
+/* State                                                               */
+/* ------------------------------------------------------------------ */
+const S = {
+  args: null,
+  sel: new Set(),
+  epoch: null,
+  structKey: null,
+  cells: new Map(),      // key -> element
+  dragging: false,
+  dragMode: "add",
+  anchor: null,          // {d, t}
+  cursor: null,
+  touchPaint: true
+};
+
+function keyOf(dateStr, timeStr) { return dateStr + " " + timeStr; }
+
+function structSignature(a) {
+  return JSON.stringify([a.mode, a.days, a.times, a.counts, a.names, a.best, a.colors, a.me]);
+}
+
+/* ------------------------------------------------------------------ */
+/* Render entry                                                        */
+/* ------------------------------------------------------------------ */
+window.addEventListener("message", (e) => {
+  if (!e.data || e.data.type !== "streamlit:render") return;
+  applyTheme(e.data.theme);
+  onRender(e.data.args || {});
+});
+
+function applyTheme(theme) {
+  if (!theme) return;
+  const r = document.documentElement.style;
+  const dark = theme.base === "dark";
+  r.setProperty("--bg", theme.backgroundColor || (dark ? "#0e1117" : "#ffffff"));
+  r.setProperty("--panel", theme.secondaryBackgroundColor || (dark ? "#20242d" : "#f3f4f8"));
+  r.setProperty("--text", theme.textColor || (dark ? "#e8eaf0" : "#16181d"));
+  r.setProperty("--line", dark ? "#343a46" : "#d9dce4");
+  r.setProperty("--line-strong", dark ? "#4a5162" : "#b6bbc7");
+  r.setProperty("--muted", dark ? "#9aa2b1" : "#6b7280");
+  if (theme.font) r.setProperty("--font", theme.font);
+}
+
+function onRender(args) {
+  const sig = structSignature(args);
+  const structChanged = sig !== S.structKey;
+  const epochChanged = String(args.epoch) !== String(S.epoch);
+
+  S.args = args;
+  if (epochChanged) {
+    S.sel = new Set(args.selected || []);
+    S.epoch = args.epoch;
+  }
+  if (structChanged) {
+    S.structKey = sig;
+    build();
+  }
+  paint();
+  resize();
+}
+
+function resize() {
+  Streamlit.height(document.documentElement.scrollHeight + 4);
+}
+window.addEventListener("resize", resize);
+
+/* ------------------------------------------------------------------ */
+/* Build DOM                                                           */
+/* ------------------------------------------------------------------ */
+function build() {
+  const a = S.args;
+  const root = document.getElementById("root");
+  root.innerHTML = "";
+  S.cells = new Map();
+
+  const days = a.days || [];
+  const times = a.times || [];
+  const edit = a.mode === "edit";
+
+  if (!days.length || !times.length) {
+    root.innerHTML = '<div class="empty">No dates to show. Adjust the date range in the sidebar.</div>';
+    return;
+  }
+  if (!edit && (!a.people || !a.people.length)) {
+    root.innerHTML = '<div class="empty">Nobody has submitted yet. Be the first — fill in your times on the “My availability” tab.</div>';
+    return;
+  }
+
+  /* toolbar */
+  const bar = document.createElement("div");
+  bar.className = "toolbar";
+  if (edit) {
+    const hint = document.createElement("span");
+    hint.className = "hint";
+    hint.textContent = "Click and drag to paint the times you’re free. Drag over filled cells to erase. Click a date or a time label to fill a whole column or row.";
+    bar.appendChild(hint);
+
+    const btn = document.createElement("button");
+    btn.className = "modebtn";
+    btn.type = "button";
+    const setLabel = () => {
+      btn.textContent = S.touchPaint ? "Touch: painting" : "Touch: scrolling";
+      btn.dataset.active = S.touchPaint ? "paint" : "scroll";
+      wrap.className = "wrap " + (S.touchPaint ? "painting" : "scrolling");
+    };
+    btn.addEventListener("click", () => { S.touchPaint = !S.touchPaint; setLabel(); });
+    bar.appendChild(btn);
+    var _setLabel = setLabel;
+  } else {
+    const hint = document.createElement("span");
+    hint.className = "hint";
+    hint.textContent = "Darker cell = more people free. Gold outline = best slot(s) for the meeting length you picked. Hover a cell to see who’s free.";
+    bar.appendChild(hint);
+  }
+  root.appendChild(bar);
+
+  /* grid */
+  const wrap = document.createElement("div");
+  wrap.className = "wrap " + (edit ? "painting" : "scrolling");
+
+  const grid = document.createElement("div");
+  grid.className = "grid " + (edit ? "edit" : "view");
+  const colW = days.length > 10 ? 62 : 78;
+  grid.style.gridTemplateColumns = `56px repeat(${days.length}, minmax(${colW}px, 1fr))`;
+  grid.style.gridAutoRows = "22px";
+
+  /* header row */
+  const corner = document.createElement("div");
+  corner.className = "corner hcell";
+  corner.innerHTML = '<div class="dow">MT</div>';
+  corner.title = "All times are Mountain Time (America/Denver)";
+  grid.appendChild(corner);
+
+  days.forEach((d, di) => {
+    const h = document.createElement("div");
+    h.className = "hcell" + (d.weekend ? " weekend" : "") + (edit ? " clickable" : "");
+    h.innerHTML =
+      `<div class="dow">${d.dow}</div><div class="day">${d.label}</div>` +
+      (d.tag ? `<div class="tag">${d.tag}</div>` : "");
+    if (edit) {
+      h.title = "Click to select / clear this whole day";
+      h.addEventListener("click", () => toggleBlock(di, di, 0, times.length - 1));
+    }
+    grid.appendChild(h);
+  });
+
+  /* body rows */
+  times.forEach((t, ti) => {
+    const lab = document.createElement("div");
+    lab.className = "tlabel" + (edit ? " clickable" : "");
+    lab.textContent = t.major ? t.label : "";
+    if (edit) {
+      lab.title = "Click to select / clear this time across every day";
+      lab.addEventListener("click", () => toggleBlock(0, days.length - 1, ti, ti));
+    }
+    grid.appendChild(lab);
+
+    days.forEach((d, di) => {
+      const c = document.createElement("div");
+      const k = keyOf(d.date, t.value);
+      c.className = "cell" +
+        (times[ti + 1] && times[ti + 1].major ? " hourline" : "") +
+        (ti === times.length - 1 ? " hourline" : "") +
+        (di === days.length - 1 ? " lastcol" : "");
+      c.dataset.d = di; c.dataset.t = ti; c.dataset.k = k;
+      if (!edit) {
+        const n = document.createElement("span");
+        n.className = "n";
+        c.appendChild(n);
+      }
+      grid.appendChild(c);
+      S.cells.set(k, c);
+    });
+  });
+
+  wrap.appendChild(grid);
+  root.appendChild(wrap);
+  if (edit && typeof _setLabel === "function") _setLabel();
+
+  if (!edit && S.args.people && S.args.people.length) {
+    const leg = document.createElement("div");
+    leg.className = "legend";
+    S.args.people.forEach((p) => {
+      const it = document.createElement("div");
+      it.className = "item";
+      it.innerHTML = `<span class="swatch" style="background:${(S.args.colors || {})[p] || "#888"}"></span>${escapeHtml(p)}`;
+      leg.appendChild(it);
+    });
+    root.appendChild(leg);
+  }
+
+  if (edit) attachDrag(grid);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ------------------------------------------------------------------ */
+/* Painting classes / colors                                           */
+/* ------------------------------------------------------------------ */
+function paint() {
+  const a = S.args;
+  if (!a) return;
+  const edit = a.mode === "edit";
+
+  if (edit) {
+    const pv = previewSet();
+    S.cells.forEach((c, k) => {
+      c.classList.toggle("on", S.sel.has(k));
+      c.classList.toggle("pv-add", pv.add.has(k));
+      c.classList.toggle("pv-del", pv.del.has(k));
+    });
+    return;
+  }
+
+  const counts = a.counts || {};
+  const names = a.names || {};
+  const colors = a.colors || {};
+  const best = new Set(a.best || []);
+  const total = Math.max(1, (a.people || []).length);
+  const mine = new Set(a.me_slots || []);
+
+  S.cells.forEach((c, k) => {
+    const who = names[k] || [];
+    const n = counts[k] || 0;
+    const label = c.querySelector(".n");
+    if (who.length) {
+      const stops = [];
+      const step = 100 / who.length;
+      who.forEach((p, i) => {
+        const col = colors[p] || "#7a8699";
+        stops.push(`${col} ${i * step}%`, `${col} ${(i + 1) * step}%`);
+      });
+      c.style.background = `linear-gradient(180deg, ${stops.join(",")})`;
+      c.style.opacity = String(0.42 + 0.58 * (n / total));
+      if (label) label.textContent = n > 1 ? n : "";
+      c.classList.remove("dim");
+      c.title = `${k} MT — ${n}/${total} free\n${who.join(", ")}`;
+    } else {
+      c.style.background = "";
+      c.style.opacity = "";
+      if (label) label.textContent = "";
+      c.classList.add("dim");
+      c.title = `${k} MT — nobody free`;
+    }
+    c.classList.toggle("best", best.has(k));
+    c.classList.toggle("me", mine.has(k));
+  });
+}
+
+function previewSet() {
+  const add = new Set(), del = new Set();
+  if (!S.dragging || !S.anchor || !S.cursor) return { add, del };
+  const days = S.args.days, times = S.args.times;
+  const d0 = Math.min(S.anchor.d, S.cursor.d), d1 = Math.max(S.anchor.d, S.cursor.d);
+  const t0 = Math.min(S.anchor.t, S.cursor.t), t1 = Math.max(S.anchor.t, S.cursor.t);
+  for (let d = d0; d <= d1; d++) {
+    for (let t = t0; t <= t1; t++) {
+      const k = keyOf(days[d].date, times[t].value);
+      (S.dragMode === "add" ? add : del).add(k);
+    }
+  }
+  return { add, del };
+}
+
+/* ------------------------------------------------------------------ */
+/* Drag interaction                                                    */
+/* ------------------------------------------------------------------ */
+function cellFromEvent(e) {
+  let el = e.target;
+  if (e.touches && e.touches.length) {
+    const t = e.touches[0];
+    el = document.elementFromPoint(t.clientX, t.clientY);
+  }
+  if (!el || !el.classList || !el.classList.contains("cell")) return null;
+  return { d: +el.dataset.d, t: +el.dataset.t, k: el.dataset.k };
+}
+
+function attachDrag(grid) {
+  const start = (e) => {
+    if (e.type === "touchstart" && !S.touchPaint) return;
+    const c = cellFromEvent(e);
+    if (!c) return;
+    if (e.cancelable) e.preventDefault();
+    S.dragging = true;
+    S.dragMode = S.sel.has(c.k) ? "del" : "add";
+    S.anchor = c; S.cursor = c;
+    paint();
+  };
+  const move = (e) => {
+    if (!S.dragging) return;
+    const c = cellFromEvent(e);
+    if (!c) return;
+    if (e.cancelable) e.preventDefault();
+    if (S.cursor && c.d === S.cursor.d && c.t === S.cursor.t) return;
+    S.cursor = c;
+    paint();
+  };
+  const end = () => {
+    if (!S.dragging) return;
+    const pv = previewSet();
+    pv.add.forEach((k) => S.sel.add(k));
+    pv.del.forEach((k) => S.sel.delete(k));
+    S.dragging = false; S.anchor = null; S.cursor = null;
+    paint();
+    commit();
+  };
+
+  grid.addEventListener("mousedown", start);
+  grid.addEventListener("mouseover", move);
+  window.addEventListener("mouseup", end);
+  grid.addEventListener("touchstart", start, { passive: false });
+  grid.addEventListener("touchmove", move, { passive: false });
+  window.addEventListener("touchend", end);
+  window.addEventListener("touchcancel", end);
+}
+
+function toggleBlock(d0, d1, t0, t1) {
+  const days = S.args.days, times = S.args.times;
+  const keys = [];
+  for (let d = d0; d <= d1; d++) for (let t = t0; t <= t1; t++) keys.push(keyOf(days[d].date, times[t].value));
+  const allOn = keys.every((k) => S.sel.has(k));
+  keys.forEach((k) => (allOn ? S.sel.delete(k) : S.sel.add(k)));
+  paint();
+  commit();
+}
+
+function commit() {
+  Streamlit.value({ slots: Array.from(S.sel).sort(), epoch: S.args.epoch });
+}
+
+Streamlit.ready();
+Streamlit.height(320);
+</script>
+</body>
+</html>
